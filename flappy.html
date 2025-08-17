@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
+  <title>Projeck Jack Flapy Mini</title>
+  <style>
+    :root { --bg:#87ceeb; --ground:#ded29e; --text:#16324f; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; background: var(--bg); font-family: system-ui, Arial, sans-serif; color: var(--text); }
+    .wrap { display:flex; align-items:center; justify-content:center; height:100%; }
+    canvas { background: linear-gradient(#aee1ff, var(--bg)); border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.15); touch-action: manipulation; }
+    .hud { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); display:flex; gap:12px; align-items:center; }
+    .pill { background: rgba(255,255,255,.8); padding: 6px 10px; border-radius: 999px; font-weight: 700; }
+    .btn { cursor:pointer; user-select:none; }
+    .footer { position: fixed; bottom: 10px; width: 100%; text-align: center; font-size: 12px; opacity: .8; }
+  </style>
+</head>
+<body>
+  <div class="hud">
+    <div class="pill">Skor: <span id="score">0</span></div>
+    <div class="pill">Rekor: <span id="best">0</span></div>
+    <div class="pill btn" id="pauseBtn">⏸️</div>
+    <div class="pill btn" id="restartBtn">🔄</div>
+  </div>
+
+  <!-- Moderator Panel -->
+  <div id="modPanel" style="
+    position: fixed; top: 60px; right: 10px; background: rgba(255,255,255,.9);
+    padding: 10px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,.2);
+    font-size: 14px; z-index: 999; display: none;
+  ">
+    <b>Panel Owner</b><br><br>
+    Speed: <input type="number" id="speedControl" value="2.2" step="0.1" style="width:60px"><br><br>
+    <label><input type="checkbox" id="godMode"> God Mode</label><br>
+    <label><input type="checkbox" id="noClip"> Tembus Tembok</label><br>
+    <label><input type="checkbox" id="autoFlap"> Auto Flap</label><br><br>
+    <button id="closeMod">Tutup</button>
+  </div>
+
+  <div id="modBtn" style="
+    position: fixed; top: 60px; right: 10px; background: #fff; border-radius: 50%;
+    width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 4px 12px rgba(0,0,0,.2); cursor: pointer;
+  ">⚙️</div>
+
+  <div class="wrap">
+    <canvas id="game" width="420" height="640" aria-label="Flappy Mini"></canvas>
+  </div>
+  <div class="footer">Ketuk layar / tekan <b>Spasi</b> untuk terbang • <b>P</b> untuk jeda</div>
+
+  <script>
+    (() => {
+      const cv = document.getElementById('game');
+      const ctx = cv.getContext('2d');
+      const scoreEl = document.getElementById('score');
+      const bestEl  = document.getElementById('best');
+      const pauseBtn = document.getElementById('pauseBtn');
+      const restartBtn = document.getElementById('restartBtn');
+
+      // Moderator
+      let mod_godMode = false;
+      let mod_noClip = false;
+      let mod_autoFlap = false;
+
+      const modPanel = document.getElementById('modPanel');
+      const modBtn = document.getElementById('modBtn');
+      const closeMod = document.getElementById('closeMod');
+      const speedControl = document.getElementById('speedControl');
+      const godModeCheck = document.getElementById('godMode');
+      const noClipCheck = document.getElementById('noClip');
+      const autoFlapCheck = document.getElementById('autoFlap');
+
+      modBtn.addEventListener('click', () => { modPanel.style.display = 'block'; });
+      closeMod.addEventListener('click', () => { modPanel.style.display = 'none'; });
+
+      speedControl.addEventListener('input', () => {
+        speed = parseFloat(speedControl.value) || PIPE_SPEED_START;
+      });
+      godModeCheck.addEventListener('change', () => { mod_godMode = godModeCheck.checked; });
+      noClipCheck.addEventListener('change', () => { mod_noClip = noClipCheck.checked; });
+      autoFlapCheck.addEventListener('change', () => { mod_autoFlap = autoFlapCheck.checked; });
+
+      // Responsive scale
+      function fitCanvas() {
+        const maxW = Math.min(window.innerWidth - 20, 520);
+        const scale = maxW / cv.width;
+        cv.style.width = (cv.width * scale) + 'px';
+        cv.style.height = (cv.height * scale) + 'px';
+      }
+      window.addEventListener('resize', fitCanvas);
+      fitCanvas();
+
+      const GROUND_H = 80;
+      const GRAV = 0.45;
+      const JUMP = -7.8;
+      const PIPE_GAP_MIN = 120, PIPE_GAP_MAX = 170;
+      const PIPE_W = 64;
+      const PIPE_DIST = 180;
+      const PIPE_SPEED_START = 2.2;
+
+      const bird = { x: 100, y: cv.height/2, vy: 0, r: 16 };
+      let pipes = [];
+      let tick = 0;
+      let score = 0;
+      let best = +localStorage.getItem('flappy_best') || 0;
+      let running = false;
+      let paused = false;
+      let gameOver = false;
+      let speed = PIPE_SPEED_START;
+
+      bestEl.textContent = best;
+
+      function reset() {
+        bird.x = 100; bird.y = cv.height/2; bird.vy = 0;
+        pipes = [];
+        tick = 0; score = 0; speed = PIPE_SPEED_START;
+        running = true; paused = false; gameOver = false;
+        scoreEl.textContent = 0;
+        spawnPipe(); spawnPipe(true);
+        speedControl.value = speed;
+      }
+
+      function spawnPipe(initial=false) {
+        const gap = rand(PIPE_GAP_MIN, PIPE_GAP_MAX);
+        const topH = rand(50, cv.height - GROUND_H - 50 - gap);
+        const x = initial ? cv.width + (pipes.length ? PIPE_DIST*(pipes.length) : 0) : cv.width + 10;
+        pipes.push({ x, top: topH, gap, passed:false });
+      }
+
+      function rand(a,b){ return Math.floor(Math.random()*(b-a+1))+a; }
+
+      function flap() {
+        if (!running) { reset(); return; }
+        if (gameOver) { reset(); return; }
+        if (paused) return;
+        bird.vy = JUMP;
+      }
+
+      function togglePause() {
+        if (!running || gameOver) return;
+        paused = !paused;
+        pauseBtn.textContent = paused ? '▶️' : '⏸️';
+      }
+
+      window.addEventListener('keydown', (e) => {
+        if (e.code === 'Space') { e.preventDefault(); flap(); }
+        if (e.key.toLowerCase() === 'p') togglePause();
+        if (e.key.toLowerCase() === 'r') reset();
+      });
+      cv.addEventListener('pointerdown', flap);
+      pauseBtn.addEventListener('click', togglePause);
+      restartBtn.addEventListener('click', reset);
+
+      drawIntro();
+      function drawIntro(){
+        drawBackground();
+        drawGround();
+        drawBird(bird.x, bird.y);
+        drawCenterText('FLAPPY MINI', 44);
+        drawSub('Ketuk layar / tekan Spasi untuk mulai', 16, 26);
+      }
+
+      let last = performance.now();
+      function loop(tNow){
+        requestAnimationFrame(loop);
+        const dt = Math.min(32, tNow - last);
+        last = tNow;
+        if (!running || paused) return;
+        update(dt/16.67);
+        render();
+      }
+      requestAnimationFrame(loop);
+
+      function update(dt){
+        tick += dt;
+
+        // Bird physics
+        bird.vy += GRAV * dt;
+        bird.y  += bird.vy * dt;
+
+        // Auto Flap
+        if (mod_autoFlap && bird.vy > 2) {
+          bird.vy = JUMP;
+        }
+
+        if (pipes.length === 0 || (cv.width - pipes[pipes.length-1].x) >= PIPE_DIST) {
+          spawnPipe();
+          speed += 0.005 * dt;
+          speedControl.value = speed.toFixed(1);
+        }
+
+        for (let p of pipes) {
+          p.x -= speed * 2.2 * dt;
+          if (!p.passed && p.x + PIPE_W < bird.x - bird.r) {
+            p.passed = true;
+            score++;
+            scoreEl.textContent = score;
+          }
+        }
+        pipes = pipes.filter(p => p.x + PIPE_W > -5);
+
+        // Collisions
+        if (bird.y - bird.r < 0) {
+          bird.y = bird.r; bird.vy = 0;
+        }
+        const groundY = cv.height - GROUND_H;
+        if (bird.y + bird.r >= groundY && !mod_godMode) {
+          endGame();
+          return;
+        }
+        for (let p of pipes) {
+          if (mod_noClip) continue;
+          const gapTop = p.top;
+          const gapBot = p.top + p.gap;
+          const bx1 = bird.x - bird.r, bx2 = bird.x + bird.r;
+          const by1 = bird.y - bird.r, by2 = bird.y + bird.r;
+          const px1 = p.x, px2 = p.x + PIPE_W;
+
+          const hitX = bx2 > px1 && bx1 < px2;
+          const hitTop = hitX && by1 < gapTop;
+          const hitBot = hitX && by2 > gapBot;
+          if ((hitTop || hitBot) && !mod_godMode) { endGame(); return; }
+        }
+      }
+
+      function endGame(){
+        gameOver = true; running = false; paused = false;
+        if (score > best) {
+          best = score;
+          localStorage.setItem('flappy_best', best);
+          bestEl.textContent = best;
+        }
+        render(true);
+        drawCenterText('GAME OVER', 40);
+        drawSub('Ketuk / Spasi untuk main lagi', 16, 24);
+      }
+
+      function render(showOverlay=false){
+        drawBackground();
+        for (let p of pipes) drawPipe(p);
+        drawBird(bird.x, bird.y);
+        drawGround();
+        if (paused && !gameOver) {
+          drawCenterText('JEDA', 42);
+          drawSub('Tekan P untuk lanjut', 16, 22);
+        }
+      }
+
+      function drawBackground(){
+        ctx.clearRect(0,0,cv.width,cv.height);
+        ctx.globalAlpha = 0.35;
+        drawCloud(60, 90, 24);
+        drawCloud(220, 60, 18);
+        drawCloud(340, 140, 26);
+        ctx.globalAlpha = 1;
+      }
+      function drawCloud(x,y,r){
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI*2);
+        ctx.arc(x+r, y-10, r*0.8, 0, Math.PI*2);
+        ctx.arc(x-r, y-8, r*0.7, 0, Math.PI*2);
+        ctx.fillStyle = 'white';
+        ctx.fill();
+      }
+      function drawGround(){
+        const y = cv.height - GROUND_H;
+        ctx.fillStyle = '#d8c884';
+        ctx.fillRect(0, y, cv.width, GROUND_H);
+        ctx.fillStyle = '#cdbf77';
+        for (let i=0;i<cv.width;i+=20){
+          ctx.fillRect(i, y+50, 12, 6);
+        }
+      }
+      function drawPipe(p){
+        const yTop = p.top, yBot = p.top + p.gap;
+        ctx.fillStyle = '#2ecc71';
+        ctx.fillRect(p.x, 0, PIPE_W, yTop);
+        ctx.fillRect(p.x-4, yTop-14, PIPE_W+8, 14);
+        ctx.fillRect(p.x, yBot, PIPE_W, cv.height - GROUND_H - yBot);
+        ctx.fillRect(p.x-4, yBot, PIPE_W+8, 14);
+        ctx.fillStyle = 'rgba(0,0,0,.1)';
+        ctx.fillRect(p.x + PIPE_W - 10, 0, 10, yTop);
+        ctx.fillRect(p.x + PIPE_W - 10, yBot, 10, cv.height - GROUND_H - yBot);
+      }
+      function drawBird(x,y){
+        ctx.save();
+        ctx.translate(x,y);
+        ctx.rotate(Math.max(-0.5, Math.min(0.6, bird.vy/10)));
+        ctx.fillStyle = '#ffcc00';
+        roundRect(-18,-12,36,24,12,true);
+        ctx.save();
+        ctx.translate(-2, 0);
+        ctx.rotate(Math.sin(tick*0.4)*0.2);
+        ctx.fillStyle = '#f2b800';
+        roundRect(-10,-6,20,12,6,true);
+        ctx.restore();
+        ctx.beginPath(); ctx.fillStyle = 'white';
+        ctx.arc(6,-4,5,0,Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.fillStyle = '#222';
+        ctx.arc(8,-4,2.2,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#ff7b00';
+        ctx.beginPath();
+        ctx.moveTo(16,-2); ctx.lineTo(28,2); ctx.lineTo(16,6); ctx.closePath(); ctx.fill();
+        ctx.restore();
+      }
+      function roundRect(x,y,w,h,r,fill){
+        ctx.beginPath();
+        ctx.moveTo(x+r,y);
+        ctx.arcTo(x+w,y,x+w,y+h,r);
+        ctx.arcTo(x+w,y+h,x,y+h,r);
+        ctx.arcTo(x,y+h,x,y,r);
+        ctx.arcTo(x,y,x+w,y,r);
+        if (fill) ctx.fill(); else ctx.stroke();
+      }
+      function drawCenterText(text, size){
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,.25)';
+        ctx.font = `bold ${size}px system-ui, Arial`;
+        ctx.textAlign = 'center';
+        ctx.fillText(text, cv.width/2, cv.height*0.42);
+        ctx.fillStyle = 'white';
+        ctx.fillText(text, cv.width/2, cv.height*0.42 - 2);
+        ctx.restore();
+      }
+      function drawSub(text, size, pad=18){
+        ctx.save();
+        ctx.font = `600 ${size}px system-ui, Arial`;
+        ctx.textAlign = 'center';
+        ctx.fillStyle = 'rgba(255,255,255,.95)';
+        ctx.fillText(text, cv.width/2, cv.height*0.42 + pad);
+        ctx.restore();
+      }
+    })();
+  </script>
+</body>
+</html>
